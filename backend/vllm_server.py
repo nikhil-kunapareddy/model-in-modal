@@ -13,7 +13,7 @@ import subprocess
 import modal
 
 from backend import config
-from backend.meter import GPU_RATE, SpendMeter
+from backend.meter import SpendMeter, gpu_rate_for
 from backend.weights import vllm_cache_volume, weights_volume
 
 app = modal.App(f"{config.APP_NAME}-vllm")
@@ -33,6 +33,18 @@ vllm_image = (
         }
     )
 )
+
+
+def gpu_name() -> str:
+    """This container's GPU as nvidia-smi names it (Modal may have used a fallback)."""
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=15, check=False,
+        ).stdout.strip()
+    except Exception:
+        return ""
+    return out.splitlines()[0] if out else ""
 
 
 def build_vllm_command() -> list[str]:
@@ -57,7 +69,7 @@ def build_vllm_command() -> list[str]:
     ]
 
 
-@app.function(image=vllm_image, gpu=config.GPU_TYPE, cpu=1.0, memory=4096, timeout=5 * 60)
+@app.function(image=vllm_image, gpu=list(config.GPU_TYPES), cpu=1.0, memory=4096, timeout=5 * 60)
 def check_vllm_flags() -> dict:
     """Every flag we pass exists in this vLLM build (~1 GPU-minute, ~$0.02).
 
@@ -104,7 +116,7 @@ def check_vllm_flags() -> dict:
 
 @app.cls(
     image=vllm_image,
-    gpu=f"{config.GPU_TYPE}:{config.GPU_COUNT}",
+    gpu=[f"{gpu}:{config.GPU_COUNT}" for gpu in config.GPU_TYPES],  # L4, else L40S
     cpu=config.GPU_CPU_CORES,
     memory=config.GPU_MEMORY_MIB,
     min_containers=config.GPU_MIN_CONTAINERS,
@@ -121,14 +133,17 @@ def check_vllm_flags() -> dict:
 class VLLMServer:
     @modal.enter()
     def start_meter(self):
-        # First thing at container startup, before vLLM is launched.
-        self.meter = SpendMeter(kind="gpu", rate=GPU_RATE).start()
+        # First thing at container startup, before vLLM is launched. The rate
+        # depends on which GPU Modal gave us (L4, or the L40S fallback).
+        gpu, rate = gpu_rate_for(gpu_name())
+        self.meter = SpendMeter(kind=f"gpu:{gpu}", rate=rate).start()
+        print(f"spend meter: {gpu} at ${rate * 3600:.4f}/hr", flush=True)
 
     @modal.web_server(
         port=config.VLLM_PORT,
         startup_timeout=config.VLLM_STARTUP_TIMEOUT_S,
         requires_proxy_auth=True,
-        label=f"{config.APP_NAME}-vllm",
+        label=config.VLLM_LABEL,
     )
     def serve(self):
         self.process = subprocess.Popen(build_vllm_command())

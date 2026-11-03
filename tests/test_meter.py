@@ -29,11 +29,28 @@ class Clock:
 
 
 # ---------------------------------------------------------------- rates
-def test_gpu_rate_matches_modal_pricing():
-    # L4 + 2 physical cores + 16 GiB, per modal.com/pricing
-    expected = 0.000222 + 2 * 0.0000131 + 16 * 0.00000222
-    assert meter.GPU_RATE == pytest.approx(expected)
-    assert meter.GPU_RATE * 3600 == pytest.approx(1.0214, abs=1e-4)
+def test_gpu_rates_match_modal_pricing():
+    # GPU + 2 physical cores + 16 GiB, per modal.com/pricing
+    cpu_mem = 2 * 0.0000131 + 16 * 0.00000222
+    assert meter.GPU_RATES["L4"] == pytest.approx(0.000222 + cpu_mem)
+    assert meter.GPU_RATES["L4"] * 3600 == pytest.approx(1.0214, abs=1e-4)
+    assert meter.GPU_RATES["L40S"] == pytest.approx(0.000542 + cpu_mem)
+    assert meter.GPU_RATES["L40S"] * 3600 == pytest.approx(2.1734, abs=1e-4)
+    assert set(meter.GPU_RATES) == set(config.GPU_TYPES)
+
+
+@pytest.mark.parametrize(
+    "name, expected",
+    [("NVIDIA L4", "L4"), ("NVIDIA L40S", "L40S"), ("nvidia l40s", "L40S"),
+     ("NVIDIA A10", None), ("", None), ("NVIDIA L40", None)],
+)
+def test_gpu_type_from_name(name, expected):
+    assert meter.gpu_type_from_name(name) == expected
+
+
+def test_unknown_gpu_is_metered_at_highest_rate():
+    assert meter.gpu_rate_for("NVIDIA L40S") == ("L40S", meter.GPU_RATES["L40S"])
+    assert meter.gpu_rate_for("NVIDIA H100 80GB HBM3") == ("unknown", max(meter.GPU_RATES.values()))
 
 
 def test_gateway_rate_uses_gateway_config():

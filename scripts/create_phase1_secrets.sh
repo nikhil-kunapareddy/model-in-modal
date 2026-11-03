@@ -12,6 +12,9 @@ MODAL=.venv/bin/modal
 
 touch .env
 chmod 600 .env
+# Appends below need .env to end with a newline, or the new line would be glued
+# onto the last existing value.
+if [ -s .env ] && [ -n "$(tail -c1 .env)" ]; then echo >> .env; fi
 
 if ! grep -q '^VLLM_API_KEY=' .env; then
   echo "VLLM_API_KEY=$(openssl rand -hex 32)" >> .env

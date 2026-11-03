@@ -39,3 +39,22 @@ longer than that are visible to the caller as redirects.
 | Meter vs Modal billing, one container | meter $0.1183 (357 s + 30 s boot allowance) vs Modal $0.1036 (~364 s billed) — meter reads ~14% high, the safe direction |
 | GPU queue time billed? | no — Modal bills from container start |
 | Daily compaction job on Modal | writes `{cycle}:closed`, leaves fresh keys alone |
+
+### Phase 3 — gateway (2026-11-03)
+
+| Check | Result |
+|---|---|
+| Unit + in-process tests | 151 pytest tests: tokens, Turnstile, rate limits (fake Redis), shaping, gateway endpoints, CORS, logging, meter |
+| Rate limiter against real Upstash | INCR+EXPIRE in one MULTI/EXEC, every key has a TTL, slots and refunds behave as in tests |
+| Deployed end-to-end (`scripts/e2e_gateway.py`) | 15/15 checks |
+| L4 availability, 10:53–11:38 PST | no L4 scheduled for 35+ min ("waiting to be scheduled on a GPU_L4 worker"); queued calls cost nothing |
+| GPU fallback (approved) | `gpu=["L4", "L40S"]`; meter reads `nvidia-smi` and bills the GPU it got (L4 $1.02/hr, L40S $2.17/hr) |
+| Cold start through the gateway | ready 187 s after the session was created: ~64 s to get an L40S, 116 s vLLM init (incl. 46 s one-time L40S compile, now cached) |
+| Visitor experience while cold | 18 `503 warming_up` replies (retry_after 10 s), answered without Redis or GPU calls |
+| Warm time to first token (L40S) | 0.14–0.30 s at the gateway, 0.27–0.56 s at the client |
+| Decode speed, single request (L40S) | ~62 tok/s (111 tokens in 1.78 s) |
+| Second stream in the same session | 429, `retry_after` 3 |
+| Per-minute limit | 429 with `retry_after` = seconds to the next minute, plus `Retry-After` header |
+| Real client IP on Modal | ASGI peer address; Modal strips a client-sent `X-Forwarded-For` and passes `X-Real-IP` through unchanged (spoofable), so no header is trusted |
+| Logs | session id, IP, prompt chars, output tokens, TTFT, latency, status; checked to contain no message text |
+| Cost of the run | L40S 177 s = $0.125 (meter), gateway ~$0.009 |

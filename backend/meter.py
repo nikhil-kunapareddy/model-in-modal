@@ -54,12 +54,32 @@ def container_rate(*, gpu_count: int, gpu_price_per_s: float, cpu_cores: float, 
 
 
 # Computed from the same constants the @app.cls / @app.function decorators use.
-GPU_RATE = container_rate(
-    gpu_count=config.GPU_COUNT,
-    gpu_price_per_s=config.PRICE_L4_PER_S,
-    cpu_cores=config.GPU_CPU_CORES,
-    memory_mib=config.GPU_MEMORY_MIB,
-)
+# One rate per GPU type the vLLM class may land on (see config.GPU_TYPES).
+GPU_RATES = {
+    gpu: container_rate(
+        gpu_count=config.GPU_COUNT,
+        gpu_price_per_s=config.GPU_PRICES_PER_S[gpu],
+        cpu_cores=config.GPU_CPU_CORES,
+        memory_mib=config.GPU_MEMORY_MIB,
+    )
+    for gpu in config.GPU_TYPES
+}
+
+
+def gpu_type_from_name(name: str) -> str | None:
+    """Map an `nvidia-smi` name like "NVIDIA L40S" to a config.GPU_TYPES entry."""
+    words = name.upper().replace("NVIDIA", " ").split()
+    # Whole-word match, so "L4" never matches "L40S".
+    return next((gpu for gpu in config.GPU_TYPES if gpu.upper() in words), None)
+
+
+def gpu_rate_for(name: str) -> tuple[str, float]:
+    """(gpu type, USD/s) for the GPU this container got. Unknown -> priciest rate."""
+    gpu = gpu_type_from_name(name)
+    if gpu is None:
+        log.warning("unknown GPU %r: metering at the highest configured rate", name)
+        return "unknown", max(GPU_RATES.values())
+    return gpu, GPU_RATES[gpu]
 GATEWAY_RATE = container_rate(
     gpu_count=0,
     gpu_price_per_s=0.0,

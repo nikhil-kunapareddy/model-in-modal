@@ -44,7 +44,10 @@ VLLM_CACHE_MOUNT = "/root/.cache/vllm"
 # ---------------------------------------------------------------------------
 # GPU container (vLLM)
 # ---------------------------------------------------------------------------
-GPU_TYPE = "L4"
+# Preference order. Modal tries L4 first and uses an L40S only when no L4 can be
+# scheduled (approved 2026-11-03 after a 35+ min L4 capacity gap). Both are Ada
+# GPUs with native FP8, so the vLLM flags are identical.
+GPU_TYPES = ("L4", "L40S")
 GPU_COUNT = 1
 GPU_CPU_CORES = 2.0  # Modal bills per physical core
 GPU_MEMORY_MIB = 16384
@@ -68,11 +71,21 @@ GATEWAY_MIN_CONTAINERS = 0
 GATEWAY_MAX_CONTAINERS = 2
 GATEWAY_MAX_INPUTS = 200
 GATEWAY_SCALEDOWN_WINDOW_S = 120
+GATEWAY_REQUEST_TIMEOUT_S = 6 * 60  # per request; > warm wait + longest stream
+GATEWAY_LABEL = f"{APP_NAME}-gateway"
+GATEWAY_BASE_URL = f"https://{MODAL_WORKSPACE}--{GATEWAY_LABEL}.us-east.modal.run"  # from `modal deploy`
+# Gateway image pins (checked on PyPI 2026-11-03; upstash-redis 1.9.0 was one day
+# old, so the previous release is pinned).
+FASTAPI_VERSION = "0.162.0"
+HTTPX_VERSION = "0.28.1"
+UPSTASH_REDIS_VERSION = "1.8.0"
 
 # ---------------------------------------------------------------------------
 # Prices — https://modal.com/pricing (checked 2026-11-02; matches `modal billing rates`)
 # ---------------------------------------------------------------------------
 PRICE_L4_PER_S = 0.000222
+PRICE_L40S_PER_S = 0.000542
+GPU_PRICES_PER_S = {"L4": PRICE_L4_PER_S, "L40S": PRICE_L40S_PER_S}
 PRICE_CPU_CORE_PER_S = 0.0000131  # per physical core
 PRICE_MEMORY_GIB_PER_S = 0.00000222
 
@@ -99,6 +112,13 @@ COMPACT_SCHEDULE_CRON = "17 4 * * *"  # daily, 04:17 UTC
 # ---------------------------------------------------------------------------
 SESSION_TTL_S = 24 * 60 * 60
 TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+TURNSTILE_TIMEOUT_S = 10
+MAX_TURNSTILE_TOKEN_CHARS = 2048  # Cloudflare's documented maximum
+# Which request header carries the visitor's real IP on Modal. None means use the
+# ASGI peer address (request.client.host). Phase 3 check (2026-11-03): Modal sets
+# the peer to the real client IP, strips a client-sent X-Forwarded-For, and passes
+# a client-sent X-Real-IP through unchanged (spoofable). So: no header.
+CLIENT_IP_HEADER: str | None = None
 
 # ---------------------------------------------------------------------------
 # Rate limits (Upstash Redis)
@@ -108,9 +128,12 @@ SESSION_MSGS_PER_DAY = 50
 SESSION_MAX_CONCURRENT_STREAMS = 1
 IP_MSGS_PER_DAY = 150
 GLOBAL_MAX_STREAMS = GPU_MAX_CONTAINERS * GPU_MAX_INPUTS  # 80
-# Safety-net TTL so a crashed stream can't hold a slot forever. Must exceed the
-# longest legitimate request (cold start + 512 tokens).
-STREAM_SLOT_TTL_S = 10 * 60
+REDIS_TIMEOUT_S = 5  # per Upstash call; on failure the gateway fails closed (503)
+# Retry hints sent with 429 / 503 responses.
+STREAM_IN_PROGRESS_RETRY_AFTER_S = 3
+BUSY_RETRY_AFTER_S = 5
+WARMING_RETRY_AFTER_S = 10
+UNAVAILABLE_RETRY_AFTER_S = 30
 
 # ---------------------------------------------------------------------------
 # Request shaping
@@ -130,9 +153,31 @@ TOP_P = 0.8
 TOP_K = 20
 PRESENCE_PENALTY = 1.5
 
-# Upstream (gateway -> vLLM). Covers a GPU cold start.
+MAX_BODY_BYTES = 256 * 1024  # request body cap for /api/session and /api/chat
+MAX_BODY_MESSAGES = 200  # reject absurd histories before trimming to MAX_TURNS
+
+# ---------------------------------------------------------------------------
+# Upstream (gateway -> vLLM)
+# ---------------------------------------------------------------------------
+VLLM_LABEL = f"{APP_NAME}-vllm"
+VLLM_BASE_URL = f"https://{MODAL_WORKSPACE}--{VLLM_LABEL}.us-east.modal.run"  # from `modal deploy`
 UPSTREAM_CONNECT_TIMEOUT_S = 10
-UPSTREAM_READ_TIMEOUT_S = 9 * 60
+# Modal holds a request while a GPU container boots (5-15 min incl. GPU queue) and
+# answers 303 after 150 s. If vLLM hasn't sent response headers within this many
+# seconds, the gateway treats the model as cold: 503 warming_up, wake it, refund.
+UPSTREAM_WARM_WAIT_S = 20
+UPSTREAM_READ_TIMEOUT_S = 60  # max silence between streamed chunks
+STREAM_MAX_DURATION_S = 5 * 60  # hard cap per response
+# Safety-net TTL so a crashed stream can't hold a stream slot (or lock a session)
+# forever. Must exceed the longest legitimate request.
+STREAM_SLOT_TTL_S = UPSTREAM_WARM_WAIT_S + STREAM_MAX_DURATION_S + 40  # 6 min
+# Wake-up ping after a new session: GET /health, re-sent until vLLM answers 200.
+WAKE_PING_TIMEOUT_S = 170  # > Modal's 150 s redirect: let Modal end the wait, then follow it
+WAKE_RETRY_PAUSE_S = 10  # after an unexpected error
+WAKE_MAX_S = 25 * 60  # worst seen: 14.5 min GPU queue + ~3 min vLLM startup
+# A GPU container stays up GPU_SCALEDOWN_WINDOW_S after its last request; the
+# gateway assumes "warm" for a bit less than that.
+WARM_ASSUME_S = GPU_SCALEDOWN_WINDOW_S - 20
 
 
 def allowed_origins() -> list[str]:

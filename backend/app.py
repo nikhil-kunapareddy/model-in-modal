@@ -1,6 +1,7 @@
 """Modal App "model-in-modal": registers every function and class.
 
 Deploy:   .venv/bin/modal deploy -m backend.app
+Dev:      MODEL_IN_MODAL_DEV=1 .venv/bin/modal deploy -m backend.app   (localhost CORS, header logs)
 One-offs: .venv/bin/modal run -m backend.app::download_weights   (CPU)
           .venv/bin/modal run -m backend.app::check_vllm_flags  (~1 L4-minute)
           .venv/bin/modal run -m backend.app::compact_spend     (CPU; also runs daily)
@@ -9,6 +10,8 @@ One-offs: .venv/bin/modal run -m backend.app::download_weights   (CPU)
 import modal
 
 from backend import config
+from backend.gateway import Gateway  # noqa: F401
+from backend.gateway import app as gateway_app
 from backend.meter import app as meter_app
 from backend.meter import compact_spend  # noqa: F401
 from backend.vllm_server import VLLMServer, check_vllm_flags  # noqa: F401
@@ -20,3 +23,4 @@ app = modal.App(config.APP_NAME)
 app.include(weights_app)
 app.include(vllm_app)
 app.include(meter_app)
+app.include(gateway_app)
