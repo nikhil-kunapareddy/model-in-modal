@@ -1,0 +1,6 @@
+# Local tooling and tests. The Modal images pin their own packages (backend/*.py, config.py).
+modal==1.6.3
+fastapi==0.162.0
+httpx==0.28.1
+upstash-redis==1.8.0
+pytest==9.2.0

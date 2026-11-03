@@ -57,7 +57,7 @@ def test_gateway_rate_uses_gateway_config():
     expected = (
         config.GATEWAY_CPU_CORES * config.PRICE_CPU_CORE_PER_S
         + config.GATEWAY_MEMORY_MIB / 1024 * config.PRICE_MEMORY_GIB_PER_S
-    )
+    ) * config.GATEWAY_REGION_MULTIPLIER
     assert meter.GATEWAY_RATE == pytest.approx(expected)
 
 

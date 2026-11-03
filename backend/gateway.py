@@ -588,6 +588,7 @@ def build_app() -> FastAPI:
     max_containers=config.GATEWAY_MAX_CONTAINERS,
     scaledown_window=config.GATEWAY_SCALEDOWN_WINDOW_S,
     timeout=config.GATEWAY_REQUEST_TIMEOUT_S,
+    region=config.GATEWAY_REGION,
     secrets=[
         modal.Secret.from_name(
             config.SECRET_GATEWAY,

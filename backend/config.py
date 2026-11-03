@@ -75,6 +75,12 @@ GATEWAY_MIN_CONTAINERS = 0
 GATEWAY_MAX_CONTAINERS = 2
 GATEWAY_MAX_INPUTS = 200  # burst ceiling per container
 GATEWAY_TARGET_INPUTS = 40  # autoscaler target per container: 80 streams -> 2 containers
+# Pin the gateway next to Modal's us-east ingress and the Upstash database: the Phase 6
+# re-test showed a second, ~0.65 s slower TTFT cluster from an unpinned gateway.
+# Region-pinned containers cost more (modal.com/docs/guide/region-selection: narrow
+# region 1.75x, broad region 1.15x); the meter applies the multiplier.
+GATEWAY_REGION = "us-east"
+GATEWAY_REGION_MULTIPLIER = 1.75
 GATEWAY_SCALEDOWN_WINDOW_S = 120
 GATEWAY_REQUEST_TIMEOUT_S = 6 * 60  # per request; > warm wait + longest stream
 GATEWAY_LABEL = f"{APP_NAME}-gateway"

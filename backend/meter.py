@@ -85,7 +85,7 @@ GATEWAY_RATE = container_rate(
     gpu_price_per_s=0.0,
     cpu_cores=config.GATEWAY_CPU_CORES,
     memory_mib=config.GATEWAY_MEMORY_MIB,
-)
+) * config.GATEWAY_REGION_MULTIPLIER  # the gateway is region-pinned
 
 
 def storage_charge_usd() -> float:
