@@ -58,3 +58,28 @@ longer than that are visible to the caller as redirects.
 | Real client IP on Modal | ASGI peer address; Modal strips a client-sent `X-Forwarded-For` and passes `X-Real-IP` through unchanged (spoofable), so no header is trusted |
 | Logs | session id, IP, prompt chars, output tokens, TTFT, latency, status; checked to contain no message text |
 | Cost of the run | L40S 177 s = $0.125 (meter), gateway ~$0.009 |
+
+### Phase 4 — webpage (2026-11-03)
+
+`web/` is plain HTML/CSS/JS (no framework, no build step), light and dark mode, mobile-first.
+`scripts/browser_check.py` drives real Safari through Safari's built-in `safaridriver`
+(W3C WebDriver over plain HTTP, no extra packages) against the dev-mode gateway with
+Cloudflare's Turnstile test keys.
+
+| State | How it was forced | Result |
+|---|---|---|
+| Offline | app stopped | red banner next to the input + Retry, input disabled |
+| Turnstile failure | always-fail test sitekey | "We couldn't verify your browser" + Try again, no session |
+| Session | always-pass test sitekey | Turnstile → `/api/session` in 3–9 s, token in `sessionStorage` |
+| Cold model | real cold start | bubble shows "Waking up the model (m:ss)…", auto-retries; first reply 66–84 s after sending (L40S) |
+| Streaming | real | tokens render as they arrive (`fetch` + `ReadableStream`, not `EventSource`) |
+| 401 | stored token corrupted, page reloaded | Turnstile re-run, request retried once, reply streamed |
+| Stop | button during a reply | partial reply kept, marked "Stopped." |
+| 429 per minute | 10+ quick messages | sticky countdown ("send again in 0:19"), ticks, clears; typed text restored |
+| 503 busy | redeploy with `GLOBAL_MAX_STREAMS = 0` | "The model is busy right now" |
+| 503 credits_exhausted | redeploy with `SOFT_CAP_USD = 0.5` | mid-chat and on load: banner with the reset date in local time, input disabled |
+
+Bugs found by these runs and fixed: the gateway sent the final SSE event before freeing the
+stream slot (an instant follow-up got a false "one at a time" 429; now released first, with a
+regression test), and the status banner scrolled away in long chats (now inside the sticky
+composer). Browser-test GPU cost: ~$0.25 (two L40S runs).

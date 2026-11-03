@@ -55,9 +55,10 @@ class Harness:
         self.turnstile_calls: list[httpx.Request] = []
         settings = dataclasses.replace(SETTINGS, dev=dev)
         self.upstream = gateway.Upstream(httpx.AsyncClient(transport=httpx.MockTransport(self._upstream)), settings)
+        self.limiter = ratelimit.RateLimiter(self.redis, ip_key=KEY)
         self.app = gateway.create_app(
             settings=settings,
-            limiter=ratelimit.RateLimiter(self.redis, ip_key=KEY),
+            limiter=self.limiter,
             spend=meter.SpendCache(fetch=self._spend, ttl=0),
             upstream=self.upstream,
             turnstile_client=httpx.AsyncClient(transport=httpx.MockTransport(self._turnstile)),
@@ -272,6 +273,43 @@ def test_chat_streams_and_shapes_request(h):
     assert h.redis.zsets == {}
     assert sorted(counter_values(h).values()) == [1, 1, 1]
     assert h.upstream.is_warm()
+
+
+def test_stream_slot_is_released_before_the_done_event():
+    """A visitor who replies the instant a reply ends must not get a false 429."""
+    h = Harness()
+    order = []
+    real_release = h.limiter.release
+
+    async def recording_release(ticket, refund=False):
+        order.append("release")
+        await real_release(ticket, refund)
+
+    h.limiter.release = recording_release
+    body = json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode()
+    scope = {
+        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "POST",
+        "scheme": "http", "path": "/api/chat", "raw_path": b"/api/chat", "query_string": b"",
+        "root_path": "", "client": (VISITOR_IP, 1), "server": ("test", 80),
+        "headers": [(b"host", b"test"), (b"content-type", b"application/json"),
+                    (b"authorization", f"Bearer {new_token()}".encode()),
+                    (b"content-length", str(len(body)).encode())],
+    }
+    delivered = False
+
+    async def receive():
+        nonlocal delivered
+        if not delivered:
+            delivered = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        await asyncio.sleep(3600)  # the browser never disconnects
+
+    async def send(message):
+        if message["type"] == "http.response.body" and b'"type": "done"' in message.get("body", b""):
+            order.append("done-event")
+
+    asyncio.run(h.app(scope, receive, send))
+    assert order == ["release", "done-event"]
 
 
 def test_mid_stream_error_is_reported(make):

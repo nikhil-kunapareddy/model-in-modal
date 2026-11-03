@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <meta name="description" content="Chat with Qwen3.5-9B, an open-weight model self-hosted with vLLM on Modal.">
+  <title>model-in-modal</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23356859'/%3E%3Cpath d='M9 11h14M9 16h10M9 21h7' stroke='white' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+  <script src="config.js"></script>
+  <script src="app.js" defer></script>
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit&onload=mimTurnstileLoaded" defer></script>
+</head>
+<body>
+  <div class="page">
+    <header class="top">
+      <h1>model-in-modal</h1>
+      <p class="sub">Chat with <strong>Qwen3.5-9B</strong>, an open-weight model running on one GPU on Modal.</p>
+    </header>
+
+    <p class="notice">
+      An experiment: answers can be wrong, usage is rate-limited, and the chat pauses when
+      this month's free GPU credit runs out. Please don't share personal information.
+    </p>
+
+    <main id="chat" class="chat" aria-label="Conversation">
+      <p id="empty" class="empty">Ask a question to start. The first reply can take a few minutes while a GPU starts up.</p>
+    </main>
+
+    <div id="turnstile" class="turnstile"></div>
+
+    <form id="composer" class="composer" autocomplete="off">
+      <!-- Inside the sticky composer so status and countdowns stay visible in long chats. -->
+      <div id="banner" class="banner" role="status" aria-live="polite" hidden>
+        <span id="banner-text"></span>
+        <button id="banner-action" type="button" class="link" hidden></button>
+      </div>
+      <!-- maxlength matches MAX_MESSAGE_CHARS in backend/config.py; the gateway enforces it too. -->
+      <textarea id="input" rows="1" maxlength="4000" placeholder="Message Qwen…" aria-label="Message" disabled></textarea>
+      <div class="actions">
+        <span id="count" class="count" aria-live="off">0 / 4000</span>
+        <button id="new-chat" type="button" class="secondary" disabled>New chat</button>
+        <button id="send" type="submit" disabled>Send</button>
+      </div>
+    </form>
+
+    <footer class="foot">
+      Qwen3.5-9B (FP8) · vLLM · Modal · protected by Cloudflare Turnstile ·
+      <a href="https://github.com/nikhil-kunapareddy/model-in-modal" rel="noopener">source</a>
+    </footer>
+  </div>
+</body>
+</html>

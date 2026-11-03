@@ -435,57 +435,76 @@ def create_app(
     async def relay(
         resp: httpx.Response, ticket: ratelimit.Ticket, fields: dict[str, Any], started: float
     ) -> AsyncIterator[bytes]:
-        """Turn vLLM's OpenAI-style SSE into the gateway's small event format."""
+        """Turn vLLM's OpenAI-style SSE into the gateway's small event format.
+
+        The stream slot is released *before* the final event goes out, so a
+        visitor who replies instantly never hits a false "one at a time" 429.
+        """
         result, output_tokens, ttft_ms, finish_reason, sent_text = "ok", 0, None, None, False
-        deadline = time.perf_counter() + config.STREAM_MAX_DURATION_S
-        try:
-            async for line in resp.aiter_lines():
-                if not line.startswith("data:"):
-                    continue
-                data = line[5:].strip()
-                if data == "[DONE]":
-                    break
+        released = False
+
+        async def release() -> None:
+            nonlocal released
+            if released:
+                return
+            released = True
+            with anyio.CancelScope(shield=True):
                 try:
-                    chunk = json.loads(data)
-                except ValueError:
-                    continue
-                if not isinstance(chunk, dict):
-                    continue
-                if "error" in chunk:  # vLLM reports mid-stream failures as a data object
-                    result = "upstream_error"
-                    yield sse({"type": "error", "error": "upstream_error",
-                               "message": "The model stopped with an error."})
-                    return
-                usage = chunk.get("usage")
-                if isinstance(usage, dict) and usage.get("completion_tokens") is not None:
-                    output_tokens = int(usage["completion_tokens"])
-                for choice in chunk.get("choices") or []:
-                    text = (choice.get("delta") or {}).get("content")
-                    if text:
-                        if ttft_ms is None:
-                            ttft_ms = round((time.perf_counter() - started) * 1000)
-                        sent_text = True
-                        yield sse({"type": "delta", "text": text})
-                    finish_reason = choice.get("finish_reason") or finish_reason
-                if time.perf_counter() > deadline:
-                    result = "timeout"
-                    yield sse({"type": "error", "error": "timeout",
-                               "message": "The response took too long and was cut off."})
-                    return
-            yield sse({"type": "done", "finish_reason": finish_reason, "output_tokens": output_tokens})
-        except httpx.HTTPError as e:
-            result = f"upstream_{type(e).__name__}"
-            yield sse({"type": "error", "error": "upstream_error", "message": "The connection to the model dropped."})
+                    await resp.aclose()  # also stops generation on the GPU if the visitor left
+                except Exception as e:
+                    log.warning("closing upstream stream failed: %s", type(e).__name__)
+                await limiter.release(ticket, refund=not sent_text and result != "ok")  # never raises
+
+        deadline = time.perf_counter() + config.STREAM_MAX_DURATION_S
+        final: dict[str, Any] | None = None
+        try:
+            try:
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                    except ValueError:
+                        continue
+                    if not isinstance(chunk, dict):
+                        continue
+                    if "error" in chunk:  # vLLM reports mid-stream failures as a data object
+                        result = "upstream_error"
+                        final = {"type": "error", "error": "upstream_error",
+                                 "message": "The model stopped with an error."}
+                        break
+                    usage = chunk.get("usage")
+                    if isinstance(usage, dict) and usage.get("completion_tokens") is not None:
+                        output_tokens = int(usage["completion_tokens"])
+                    for choice in chunk.get("choices") or []:
+                        text = (choice.get("delta") or {}).get("content")
+                        if text:
+                            if ttft_ms is None:
+                                ttft_ms = round((time.perf_counter() - started) * 1000)
+                            sent_text = True
+                            yield sse({"type": "delta", "text": text})
+                        finish_reason = choice.get("finish_reason") or finish_reason
+                    if time.perf_counter() > deadline:
+                        result = "timeout"
+                        final = {"type": "error", "error": "timeout",
+                                 "message": "The response took too long and was cut off."}
+                        break
+            except httpx.HTTPError as e:
+                result = f"upstream_{type(e).__name__}"
+                final = {"type": "error", "error": "upstream_error",
+                         "message": "The connection to the model dropped."}
+            if final is None:
+                final = {"type": "done", "finish_reason": finish_reason, "output_tokens": output_tokens}
+            await release()  # free the slot first, then tell the browser we're finished
+            yield sse(final)
         except (asyncio.CancelledError, GeneratorExit):
             result = "client_disconnected"
             raise
         finally:
-            with anyio.CancelScope(shield=True):
-                try:
-                    await resp.aclose()  # stops generation on the GPU if the visitor left
-                except Exception as e:
-                    log.warning("closing upstream stream failed: %s", type(e).__name__)
-                await limiter.release(ticket, refund=not sent_text and result != "ok")  # never raises
+            await release()
             if result == "ok":
                 upstream.mark_warm()
             log_line("chat", **fields, output_tokens=output_tokens, ttft_ms=ttft_ms if ttft_ms is not None else "-",
