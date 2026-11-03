@@ -11,6 +11,8 @@ Scenarios:
     full            WAKES A GPU. Session, warming_up, streaming, 401 re-auth, Stop,
                     429 countdown, then redeploys with temporary config overrides
                     for busy and credits_exhausted (config.py is restored after each).
+    public-credits  --prod: forced credits_exhausted on the live site, then restores
+    public-chat     real Turnstile + one streamed reply on the live site (WAKES A GPU)
 
 Usage: .venv/bin/python scripts/browser_check.py <scenario> --page http://localhost:8080/ [--out DIR]
 Prints no secrets. Screenshots are written to --out.
@@ -30,6 +32,7 @@ import httpx
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 MODAL = str(ROOT / ".venv/bin/modal")
+DEPLOY_DEV = "1"  # --prod switches temporary redeploys to production mode
 results: list[tuple[str, bool, str]] = []
 
 
@@ -130,14 +133,14 @@ def deploy_with(overrides: dict[str, str], ready=None) -> None:
     path = ROOT / "backend/config.py"
     original = path.read_text()
     text = original
-    for name, value in overrides.items():
+    for name, value in overrides.items():  # no overrides = plain redeploy
         text, n = re.subn(rf"^{name} = .*$", f"{name} = {value}  # TEMPORARY browser_check override", text, flags=re.M)
         assert n == 1, name
     path.write_text(text)
     try:
         print(f"      stop + deploy with {overrides} ...", flush=True)
         subprocess.run([MODAL, "app", "stop", "model-in-modal", "-y"], capture_output=True, cwd=ROOT)
-        subprocess.run([MODAL, "deploy", "-m", "backend.app"], env={**os.environ, "MODEL_IN_MODAL_DEV": "1"},
+        subprocess.run([MODAL, "deploy", "-m", "backend.app"], env={**os.environ, "MODEL_IN_MODAL_DEV": DEPLOY_DEV},
                        check=True, capture_output=True, cwd=ROOT)
     finally:
         path.write_text(original)
@@ -282,19 +285,54 @@ def scenario_full(s: Safari, page: str, out: pathlib.Path) -> None:
     s.screenshot(out / "mobile-credits.png")
 
 
+def scenario_public_credits(s: Safari, page: str, out: pathlib.Path) -> None:
+    """Forced credits_exhausted on the public site; always restores the normal deploy."""
+    try:
+        deploy_with({"SOFT_CAP_USD": "0.5"}, ready=lambda st: st.get("reason") == "credits_exhausted")
+        s.goto(page)
+        ok = banner_is(s, "credits", 40)
+        check("public: credits banner on load", bool(ok) and "back on" in s.js(BANNER)["text"], s.js(BANNER)["text"])
+        check("public: input disabled", s.js(CONTROLS)["inputDisabled"])
+        check("public: no session created (no Turnstile, no GPU wake)", not s.js(HAS_SESSION))
+        s.screenshot(out / "public-credits.png")
+        s.size(420, 860)
+        s.screenshot(out / "public-credits-mobile.png")
+    finally:
+        deploy_with({}, ready=lambda st: st.get("available") is True)
+    check("public: normal cap restored (status available)", True)
+
+
+def scenario_public_chat(s: Safari, page: str, out: pathlib.Path) -> None:
+    """Real Turnstile + one streamed reply on the public site. WAKES A GPU."""
+    s.goto(page)
+    got = s.wait(HAS_SESSION, 60)
+    if not check("public: real Turnstile issued a session", bool(got), json.dumps(s.js(BANNER))):
+        s.screenshot(out / "public-turnstile.png")
+        return
+    t0 = time.time()
+    type_and_send(s, "Say hello in five words.")
+    bot = wait_reply(s, 26 * 60, shot=out / "public-warming.png")
+    check("public: reply streams", bool(bot and bot["status"] == "done" and bot["text"]),
+          f"{time.time() - t0:.0f}s, waited={bot and bot.get('saw_waiting')}")
+    s.screenshot(out / "public-reply.png")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("scenario", choices=["offline", "turnstile-fail", "full"])
+    parser.add_argument("scenario", choices=["offline", "turnstile-fail", "full", "public-credits", "public-chat"])
+    parser.add_argument("--prod", action="store_true", help="temporary redeploys use production mode")
     parser.add_argument("--page", default="http://localhost:8080/")
     parser.add_argument("--out", default=str(ROOT / "browser-check"))
     args = parser.parse_args()
+    global DEPLOY_DEV
+    DEPLOY_DEV = "0" if args.prod else "1"
     out = pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     s = Safari()
     try:
         s.size(1100, 900)
-        {"offline": scenario_offline, "turnstile-fail": scenario_turnstile_fail,
-         "full": scenario_full}[args.scenario](s, args.page, out)
+        {"offline": scenario_offline, "turnstile-fail": scenario_turnstile_fail, "full": scenario_full,
+         "public-credits": scenario_public_credits, "public-chat": scenario_public_chat}[args.scenario](s, args.page, out)
     finally:
         s.quit()
     failed = [n for n, ok, _ in results if not ok]

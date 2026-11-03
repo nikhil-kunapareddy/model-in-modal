@@ -83,3 +83,19 @@ Bugs found by these runs and fixed: the gateway sent the final SSE event before 
 stream slot (an instant follow-up got a false "one at a time" 429; now released first, with a
 regression test), and the status banner scrolled away in long chats (now inside the sticky
 composer). Browser-test GPU cost: ~$0.25 (two L40S runs).
+
+### Phase 5 — public deploy (2026-11-03)
+
+| Check | Result |
+|---|---|
+| Public URL | **https://modelinmodal.duckdns.org** — GitHub Pages via `.github/workflows/pages.yml` (exact-pinned actions) |
+| DNS | DuckDNS A record → 185.199.108.153; same answer from 1.1.1.1, 8.8.8.8, 9.9.9.9 |
+| HTTPS | GitHub certificate approved ~20 min after DNS; Enforce HTTPS on; `http://` → 301 `https://` |
+| Fallback origin | `nikhil-kunapareddy.github.io/model-in-modal` → 301 to the custom domain |
+| Backend mode | production (no localhost CORS, no header logging); 8/8 API checks |
+| vLLM endpoint without proxy token | 401 |
+| Forced `credits_exhausted` (`SOFT_CAP_USD = 0.5`, live site) | banner with the reset date, input disabled, no session created so no GPU woke; normal cap restored after |
+| Real visitor (phone) | Turnstile → session; GPU (L40S) started 10 s later; vLLM ready 76 s after the session; reply TTFT 162 ms at the gateway |
+| Turnstile vs. automation | the real widget shows "Verify you are human" to WebDriver-driven Safari, as designed |
+| Scale to zero | all containers gone ~2 min 45 s after the last message (120 s window + shutdown) |
+| Cost of the live test | $0.16 (L40S, 240 s) |
