@@ -13,6 +13,7 @@ import subprocess
 import modal
 
 from backend import config
+from backend.meter import GPU_RATE, SpendMeter
 from backend.weights import vllm_cache_volume, weights_volume
 
 app = modal.App(f"{config.APP_NAME}-vllm")
@@ -43,7 +44,9 @@ def build_vllm_command() -> list[str]:
         "--served-model-name", config.SERVED_MODEL_NAME,
         "--host", "0.0.0.0",
         "--port", str(config.VLLM_PORT),
-        "--quantization", "fp8",  # no official FP8 checkpoint: quantize BF16 at load
+        # No official FP8 checkpoint: quantize BF16 at load. ("fp8" is the deprecated
+        # alias of the same method in vLLM 0.32.)
+        "--quantization", "fp8_per_tensor",
         "--kv-cache-dtype", "fp8",
         "--max-model-len", str(config.MAX_MODEL_LEN),
         "--max-num-seqs", str(config.MAX_NUM_SEQS),
@@ -116,6 +119,11 @@ def check_vllm_flags() -> dict:
 )
 @modal.concurrent(max_inputs=config.GPU_MAX_INPUTS)
 class VLLMServer:
+    @modal.enter()
+    def start_meter(self):
+        # First thing at container startup, before vLLM is launched.
+        self.meter = SpendMeter(kind="gpu", rate=GPU_RATE).start()
+
     @modal.web_server(
         port=config.VLLM_PORT,
         startup_timeout=config.VLLM_STARTUP_TIMEOUT_S,
@@ -134,3 +142,6 @@ class VLLMServer:
                 proc.wait(timeout=20)
             except subprocess.TimeoutExpired:
                 proc.kill()
+        meter = getattr(self, "meter", None)
+        if meter:
+            meter.stop()  # final write, after vLLM has exited

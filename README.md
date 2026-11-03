@@ -20,9 +20,22 @@ vLLM on Modal, rate-limited and capped to run on Modal's $30/month free credit.
 | Cold start #2 (compile + Triton cache warm) | 540 s client-side; vLLM init 175 s |
 | — of which waiting for L4 capacity | ~330 s ("waiting to be scheduled on a GPU_L4 worker") |
 | — one-time FlashInfer JIT (now cached on Volume) | ~130 s |
-| Expected vLLM startup with all caches warm | ~80 s (estimate) + GPU queue time |
+| Cold start #3 (FlashInfer cached; compile cache invalidated by flag change) | vLLM init 161 s, of which compile 134 s; warmup 1.4 s |
+| Expected vLLM startup with all caches warm | ~75 s + GPU queue time (queue is not billed) |
 | Scale to zero after last request | 2 min 32 s / 2 min 53 s |
 | Auth: no proxy token / proxy token without vLLM key | 401 / 401 |
 
 Modal returns `303 See Other` to any request still waiting after 150 s, so cold starts
 longer than that are visible to the caller as redirects.
+
+### Phase 2 — spend meter (2026-11-03)
+
+| Check | Result |
+|---|---|
+| Meter key appears | at container start, 26 s before vLLM launches |
+| Update interval | every ~30.5 s while running |
+| Final write on exit | yes, on SIGTERM at scale-down |
+| Updates after scale-down | none (key frozen) |
+| Meter vs Modal billing, one container | meter $0.1183 (357 s + 30 s boot allowance) vs Modal $0.1036 (~364 s billed) — meter reads ~14% high, the safe direction |
+| GPU queue time billed? | no — Modal bills from container start |
+| Daily compaction job on Modal | writes `{cycle}:closed`, leaves fresh keys alone |

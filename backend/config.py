@@ -79,9 +79,20 @@ PRICE_MEMORY_GIB_PER_S = 0.00000222
 # ---------------------------------------------------------------------------
 # Budget / spend meter
 # ---------------------------------------------------------------------------
-SOFT_CAP_USD = 27.0  # Modal workspace budget of $30 is the hard stop
+SOFT_CAP_USD = 27.0  # Modal's budget / spend limit is the hard stop
 METER_INTERVAL_S = 30
 SPEND_CACHE_TTL_S = 30
+# Modal bills from container boot; the meter starts in @modal.enter. Count a fixed
+# overhead per container for boot + shutdown time the meter can't see.
+METER_STARTUP_OVERHEAD_S = 30
+# Volumes are billed even with zero containers ($0.09/GiB/month, `modal billing
+# rates`). Weights are 18.0 GiB; caches ~1-2 GiB. Counted once per cycle.
+VOLUME_STORAGE_GIB = 20
+PRICE_VOLUME_GIB_MONTH = 0.09
+# Modal Dict entries expire after 7 days without reads/writes. A daily job folds
+# finished containers into one per-cycle key and rewrites it.
+METER_STALE_AFTER_S = 15 * 60  # no write for this long => container is gone
+COMPACT_SCHEDULE_CRON = "17 4 * * *"  # daily, 04:17 UTC
 
 # ---------------------------------------------------------------------------
 # Sessions
