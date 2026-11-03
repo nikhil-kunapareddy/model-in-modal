@@ -1,0 +1,34 @@
+# Publishes web/ (static page) to GitHub Pages on every push to main that touches it.
+# Repo setting required once: Settings > Pages > Source = "GitHub Actions".
+# The custom domain is set in Settings > Pages; web/CNAME records it too.
+name: Deploy web to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths: ["web/**", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write # create the Pages deployment
+  id-token: write # OIDC token proving the deployment comes from this workflow
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/configure-pages@v6.0.0
+      - uses: actions/upload-pages-artifact@v5.0.0
+        with:
+          path: web
+      - id: deployment
+        uses: actions/deploy-pages@v5.0.1
