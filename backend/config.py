@@ -35,6 +35,7 @@ VLLM_VERSION = "0.32.0"  # Qwen3.5 supported since 0.17.0; 0.32.0 released 2026-
 # vLLM 0.32.0 pins torch 2.13.0 (CUDA 13.0). Modal hosts ship CUDA driver 13.3.
 CUDA_BASE_IMAGE = "nvidia/cuda:13.0.3-devel-ubuntu24.04"
 PYTHON_VERSION = "3.12"
+HF_HUB_VERSION = "2.2.0"  # for the one-off weights download
 
 WEIGHTS_MOUNT = "/weights"
 MODEL_DIR = f"{WEIGHTS_MOUNT}/{MODEL_REPO.split('/')[-1]}"
