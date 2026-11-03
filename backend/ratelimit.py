@@ -22,6 +22,9 @@ Stream slots are sorted sets of {ticket: start_time}:
 Members older than STREAM_SLOT_TTL_S are dropped on every admission, so a
 crashed stream can't hold a slot, or lock a session, for longer than that.
 
+The load-test bypass (skip_visitor_limits) skips the counters and the
+per-session slot; it still takes a global slot, so the global cap holds.
+
 IPs are stored only as a keyed hash. After a 429, the session or IP is also
 blocked in this container's memory until its window ends, so repeated attempts
 don't spend Upstash commands.
@@ -114,23 +117,27 @@ class RateLimiter:
                      to_midnight, ip, "Daily message limit reached for your network."),
         ]
 
-    async def admit(self, session_id: str, ip: str) -> tuple[Decision, Ticket | None]:
+    async def admit(
+        self, session_id: str, ip: str, *, skip_visitor_limits: bool = False
+    ) -> tuple[Decision, Ticket | None]:
         """Count one message and take one stream slot, or say why not.
+
+        `skip_visitor_limits` (load test only) skips the per-session and per-IP
+        limits. The global stream cap always applies.
 
         Raises RateLimitUnavailable if Upstash can't be reached.
         """
         now = self._clock()
         ip_hash = self.ip_hash(ip)
-        for scope in (f"s:{session_id}", f"ip:{ip_hash}"):
-            blocked = self._blocked.get(scope)
-            if blocked and blocked[0] > now:
-                return _limited(blocked[1], blocked[0] - now), None
-
-        counters = self._counters(session_id, ip_hash, now)
-        slots = [
-            (f"rl:s:{session_id}:streams", config.SESSION_MAX_CONCURRENT_STREAMS),
-            (GLOBAL_STREAMS_KEY, config.GLOBAL_MAX_STREAMS),
-        ]
+        slots = [(GLOBAL_STREAMS_KEY, config.GLOBAL_MAX_STREAMS)]
+        counters: list[_Counter] = []
+        if not skip_visitor_limits:
+            for scope in (f"s:{session_id}", f"ip:{ip_hash}"):
+                blocked = self._blocked.get(scope)
+                if blocked and blocked[0] > now:
+                    return _limited(blocked[1], blocked[0] - now), None
+            counters = self._counters(session_id, ip_hash, now)
+            slots.insert(0, (f"rl:s:{session_id}:streams", config.SESSION_MAX_CONCURRENT_STREAMS))
         member = uuid.uuid4().hex
 
         tx = self._redis.multi()
@@ -157,11 +164,12 @@ class RateLimiter:
                 await self.release(ticket)
                 self._block(c.scope, now + c.retry_after, c.message)
                 return _limited(c.message, c.retry_after), None
-        if in_use[0] > slots[0][1]:
-            await self.release(ticket)
-            return _limited("Wait for the current response to finish.",
-                            config.STREAM_IN_PROGRESS_RETRY_AFTER_S), None
-        if in_use[1] > slots[1][1]:
+        for (key, limit), used in zip(slots, in_use):
+            if used > limit and key != GLOBAL_STREAMS_KEY:  # this session's own stream slot
+                await self.release(ticket)
+                return _limited("Wait for the current response to finish.",
+                                config.STREAM_IN_PROGRESS_RETRY_AFTER_S), None
+        if in_use[-1] > config.GLOBAL_MAX_STREAMS:  # the global slot is always last
             await self.release(ticket, refund=True)
             return Decision(False, 503, "busy", "The model is busy. Try again shortly.",
                             config.BUSY_RETRY_AFTER_S), None

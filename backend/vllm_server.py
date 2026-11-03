@@ -8,6 +8,7 @@ vLLM's startup log of non-default CLI args.
 """
 
 import json
+import os
 import subprocess
 
 import modal
@@ -137,7 +138,8 @@ class VLLMServer:
         # depends on which GPU Modal gave us (L4, or the L40S fallback).
         gpu, rate = gpu_rate_for(gpu_name())
         self.meter = SpendMeter(kind=f"gpu:{gpu}", rate=rate).start()
-        print(f"spend meter: {gpu} at ${rate * 3600:.4f}/hr", flush=True)
+        print(f"spend meter: {gpu} at ${rate * 3600:.4f}/hr, region={os.environ.get('MODAL_REGION', 'unknown')}, "
+              f"cloud={os.environ.get('MODAL_CLOUD_PROVIDER', 'unknown')}", flush=True)
 
     @modal.web_server(
         port=config.VLLM_PORT,

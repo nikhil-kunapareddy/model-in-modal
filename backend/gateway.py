@@ -16,7 +16,7 @@
 
 Stream format, one JSON object per SSE `data:` line:
     {"type": "delta", "text": "..."}
-    {"type": "done", "finish_reason": "stop" | "length", "output_tokens": 42}
+    {"type": "done", "finish_reason": "stop" | "length", "output_tokens": 42, "ttft_ms": 180}
     {"type": "error", "error": "upstream_error" | "timeout", "message": "..."}
 
 Errors are always JSON: {error, message, retry_after?, resets_at?}.
@@ -27,6 +27,7 @@ never message content or secrets.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -69,6 +70,7 @@ class Settings:
     proxy_secret: str
     vllm_url: str = config.VLLM_BASE_URL
     dev: bool = False
+    loadtest_key: str = ""  # empty = load-test bypass disabled
 
     def __repr__(self) -> str:  # never let secrets reach a log line
         return f"Settings(vllm_url={self.vllm_url!r}, dev={self.dev}, secrets=<redacted>)"
@@ -79,6 +81,9 @@ class Settings:
         key = env["SESSION_SIGNING_KEY"]
         if len(key) < 32:
             raise RuntimeError("SESSION_SIGNING_KEY must be at least 32 characters")
+        loadtest_key = env.get("LOADTEST_KEY", "")
+        if len(loadtest_key) < config.LOADTEST_MIN_KEY_CHARS:
+            loadtest_key = ""  # e.g. "off": bypass disabled
         return cls(
             signing_key=key.encode(),
             turnstile_secret=env["TURNSTILE_SECRET"],
@@ -86,7 +91,14 @@ class Settings:
             proxy_key=env["MODAL_PROXY_KEY"],
             proxy_secret=env["MODAL_PROXY_SECRET"],
             dev=DEV,
+            loadtest_key=loadtest_key,
         )
+
+    def is_loadtest(self, header_value: str | None) -> bool:
+        """True only if the bypass is enabled and the header matches (constant time)."""
+        if not self.loadtest_key or not header_value:
+            return False
+        return hmac.compare_digest(header_value.encode(), self.loadtest_key.encode())
 
     def upstream_headers(self) -> dict[str, str]:
         return {
@@ -374,8 +386,11 @@ def create_app(
             return finish(warming_response(), "warming_up")
 
         # 3 + 4. per-session / per-IP limits, then the global stream cap
+        loadtest = settings.is_loadtest(request.headers.get(config.LOADTEST_HEADER))
+        if loadtest:
+            fields["loadtest"] = 1
         try:
-            decision, ticket = await limiter.admit(sid, fields["ip"])
+            decision, ticket = await limiter.admit(sid, fields["ip"], skip_visitor_limits=loadtest)
         except ratelimit.RateLimitUnavailable as e:
             log.error("rate limiter unavailable: %s", e)
             return finish(error_response(503, "unavailable", "The service is temporarily unavailable.",
@@ -457,6 +472,8 @@ def create_app(
 
         deadline = time.perf_counter() + config.STREAM_MAX_DURATION_S
         final: dict[str, Any] | None = None
+        pending: list[str] = []  # token text received but not yet sent
+        last_flush = 0.0
         try:
             try:
                 async for line in resp.aiter_lines():
@@ -484,10 +501,14 @@ def create_app(
                         if text:
                             if ttft_ms is None:
                                 ttft_ms = round((time.perf_counter() - started) * 1000)
-                            sent_text = True
-                            yield sse({"type": "delta", "text": text})
+                            pending.append(text)
                         finish_reason = choice.get("finish_reason") or finish_reason
-                    if time.perf_counter() > deadline:
+                    now = time.perf_counter()
+                    if pending and (not sent_text or now - last_flush >= config.STREAM_FLUSH_INTERVAL_S):
+                        yield sse({"type": "delta", "text": "".join(pending)})
+                        pending.clear()
+                        sent_text, last_flush = True, now
+                    if now > deadline:
                         result = "timeout"
                         final = {"type": "error", "error": "timeout",
                                  "message": "The response took too long and was cut off."}
@@ -496,8 +517,13 @@ def create_app(
                 result = f"upstream_{type(e).__name__}"
                 final = {"type": "error", "error": "upstream_error",
                          "message": "The connection to the model dropped."}
+            if pending:  # whatever arrived since the last batch
+                yield sse({"type": "delta", "text": "".join(pending)})
+                pending.clear()
+                sent_text = True
             if final is None:
-                final = {"type": "done", "finish_reason": finish_reason, "output_tokens": output_tokens}
+                final = {"type": "done", "finish_reason": finish_reason,
+                         "output_tokens": output_tokens, "ttft_ms": ttft_ms}
             await release()  # free the slot first, then tell the browser we're finished
             yield sse(final)
         except (asyncio.CancelledError, GeneratorExit):
@@ -570,15 +596,18 @@ def build_app() -> FastAPI:
         ),
         modal.Secret.from_name(config.SECRET_PROXY, required_keys=["MODAL_PROXY_KEY", "MODAL_PROXY_SECRET"]),
         modal.Secret.from_name(config.SECRET_VLLM, required_keys=["VLLM_API_KEY"]),
+        modal.Secret.from_name(config.SECRET_LOADTEST, required_keys=["LOADTEST_KEY"]),
     ],
 )
-@modal.concurrent(max_inputs=config.GATEWAY_MAX_INPUTS)
+@modal.concurrent(max_inputs=config.GATEWAY_MAX_INPUTS, target_inputs=config.GATEWAY_TARGET_INPUTS)
 class Gateway:
     @modal.enter()
     def start(self):
         self.meter = meter.SpendMeter(kind="gateway", rate=meter.GATEWAY_RATE).start()
         logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
         logging.getLogger("httpx").setLevel(logging.WARNING)  # no per-request URL lines
+        log.info("gateway container up: region=%s cloud=%s", os.environ.get("MODAL_REGION", "unknown"),
+                 os.environ.get("MODAL_CLOUD_PROVIDER", "unknown"))
 
     @modal.asgi_app(label=config.GATEWAY_LABEL)
     def web(self) -> FastAPI:

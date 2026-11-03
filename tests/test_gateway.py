@@ -44,8 +44,11 @@ def stream_response(body=SSE_OK):
     return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body.encode())
 
 
+LOADTEST_KEY = "L" * 40
+
+
 class Harness:
-    def __init__(self, *, spend=1.0, turnstile_ok=True, dev=False, chat=None, health=None):
+    def __init__(self, *, spend=1.0, turnstile_ok=True, dev=False, chat=None, health=None, loadtest_key=""):
         self.spend_value = spend
         self.turnstile_ok = turnstile_ok
         self.chat_handler = chat or (lambda request: stream_response())
@@ -53,7 +56,7 @@ class Harness:
         self.redis = FakeRedis()
         self.upstream_calls: list[httpx.Request] = []
         self.turnstile_calls: list[httpx.Request] = []
-        settings = dataclasses.replace(SETTINGS, dev=dev)
+        settings = dataclasses.replace(SETTINGS, dev=dev, loadtest_key=loadtest_key)
         self.upstream = gateway.Upstream(httpx.AsyncClient(transport=httpx.MockTransport(self._upstream)), settings)
         self.limiter = ratelimit.RateLimiter(self.redis, ip_key=KEY)
         self.app = gateway.create_app(
@@ -88,9 +91,10 @@ class Harness:
     def health_calls(self):
         return [c for c in self.upstream_calls if c.url.path == "/health"]
 
-    def chat(self, token, content="hi", **extra):
+    def chat(self, token, content="hi", headers=None, **extra):
         body = {"messages": [{"role": "user", "content": content}], **extra}
-        return self.client.post("/api/chat", json=body, headers={"Authorization": f"Bearer {token}"})
+        return self.client.post("/api/chat", json=body,
+                                headers={"Authorization": f"Bearer {token}", **(headers or {})})
 
 
 @pytest.fixture
@@ -253,7 +257,9 @@ def test_chat_streams_and_shapes_request(h):
     r = h.chat(new_token(), content="hello there", model="gpt-4", max_tokens=99999, temperature=2)
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/event-stream")
-    assert events(r) == [
+    evs = events(r)
+    assert isinstance(evs[-1].pop("ttft_ms"), int)
+    assert evs == [
         {"type": "delta", "text": "Hel"},
         {"type": "delta", "text": "lo"},
         {"type": "done", "finish_reason": "stop", "output_tokens": 2},
@@ -503,3 +509,92 @@ def test_client_ip_header_uses_rightmost_entry(monkeypatch):
     req = request_with({"x-forwarded-for": "6.6.6.6, 198.51.100.9"})
     assert gateway.client_ip(req) == "198.51.100.9"
     assert gateway.client_ip(request_with({})) == "10.0.0.1"
+
+
+# ---------------------------------------------------------------- load-test bypass
+BYPASS = {"X-Loadtest-Key": LOADTEST_KEY}
+
+
+def test_loadtest_header_skips_session_and_ip_limits(make):
+    h = make(loadtest_key=LOADTEST_KEY)
+    token = new_token()
+    statuses = [h.chat(token, headers=BYPASS).status_code for _ in range(config.SESSION_MSGS_PER_MIN + 5)]
+    assert statuses == [200] * (config.SESSION_MSGS_PER_MIN + 5)
+    assert counter_values(h) == {}  # nothing counted against the session or IP
+    # A session already streaming doesn't block a load-test request either.
+    s = sessions.issue(KEY)
+    h.redis.zadd(f"rl:s:{s.session_id}:streams", {"other": time.time()})
+    assert h.chat(s.token, headers=BYPASS).status_code == 200
+
+
+def test_loadtest_header_never_skips_budget_or_global_cap(make):
+    h = make(loadtest_key=LOADTEST_KEY, spend=config.SOFT_CAP_USD)
+    r = h.chat(new_token(), headers=BYPASS)
+    assert r.status_code == 503 and r.json()["error"] == "credits_exhausted"
+    assert h.chat_calls() == []
+
+    h = make(loadtest_key=LOADTEST_KEY)
+    now = time.time()
+    h.redis.zadd(ratelimit.GLOBAL_STREAMS_KEY, {f"m{i}": now for i in range(config.GLOBAL_MAX_STREAMS)})
+    r = h.chat(new_token(), headers=BYPASS)
+    assert r.status_code == 503 and r.json()["error"] == "busy"
+
+
+def test_loadtest_header_still_needs_a_valid_session(make):
+    h = make(loadtest_key=LOADTEST_KEY)
+    r = h.client.post("/api/chat", json={"messages": [{"role": "user", "content": "hi"}]}, headers=BYPASS)
+    assert r.status_code == 401
+
+
+@pytest.mark.parametrize("enabled_key, header", [
+    (LOADTEST_KEY, "wrong-" + "x" * 40),  # wrong value
+    ("", LOADTEST_KEY),  # bypass disabled
+])
+def test_wrong_or_disabled_loadtest_key_gets_normal_limits(make, enabled_key, header):
+    h = make(loadtest_key=enabled_key)
+    token = new_token()
+    for _ in range(config.SESSION_MSGS_PER_MIN):
+        h.chat(token, headers={"X-Loadtest-Key": header})
+    r = h.chat(token, headers={"X-Loadtest-Key": header})
+    if r.status_code == 200:  # minute rolled over mid-test
+        r = h.chat(token, headers={"X-Loadtest-Key": header})
+    assert r.status_code == 429
+
+
+@pytest.mark.parametrize("value, enabled", [("off", False), ("", False), ("k" * 31, False), ("k" * 32, True)])
+def test_loadtest_key_from_env(value, enabled):
+    env = {"SESSION_SIGNING_KEY": "a" * 64, "TURNSTILE_SECRET": "t", "VLLM_API_KEY": "v",
+           "MODAL_PROXY_KEY": "wk", "MODAL_PROXY_SECRET": "ws", "LOADTEST_KEY": value}
+    s = gateway.Settings.from_env(env)
+    assert bool(s.loadtest_key) is enabled
+    assert s.is_loadtest(value) is enabled
+
+
+def test_loadtest_requests_are_logged_without_the_key(make, caplog):
+    caplog.set_level(logging.INFO, logger="model-in-modal")
+    h = make(loadtest_key=LOADTEST_KEY)
+    assert h.chat(new_token(), headers=BYPASS).status_code == 200
+    assert "loadtest=1" in caplog.text
+    assert LOADTEST_KEY not in caplog.text
+
+
+# ---------------------------------------------------------------- token batching
+def test_tokens_are_batched_but_first_token_goes_out_alone(make, monkeypatch):
+    monkeypatch.setattr(config, "STREAM_FLUSH_INTERVAL_S", 3600)  # never flush mid-stream
+    words = [f"w{i} " for i in range(50)]
+    body = sse_body(*[{"choices": [{"delta": {"content": w}}]} for w in words],
+                    {"choices": [], "usage": {"completion_tokens": 50}})
+    h = make(chat=lambda request: stream_response(body))
+    evs = events(h.chat(new_token()))
+    deltas = [e["text"] for e in evs if e["type"] == "delta"]
+    assert deltas == ["w0 ", "".join(words[1:])]  # first token immediately, the rest in one batch
+    assert evs[-1]["type"] == "done" and evs[-1]["output_tokens"] == 50
+
+
+def test_batched_text_is_flushed_before_a_mid_stream_error(make, monkeypatch):
+    monkeypatch.setattr(config, "STREAM_FLUSH_INTERVAL_S", 3600)
+    body = sse_body({"choices": [{"delta": {"content": "a"}}]}, {"choices": [{"delta": {"content": "b"}}]},
+                    {"error": {"message": "boom"}})
+    h = make(chat=lambda request: stream_response(body))
+    evs = events(h.chat(new_token()))
+    assert [(e["type"], e.get("text")) for e in evs] == [("delta", "a"), ("delta", "b"), ("error", None)]

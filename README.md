@@ -99,3 +99,37 @@ composer). Browser-test GPU cost: ~$0.25 (two L40S runs).
 | Turnstile vs. automation | the real widget shows "Verify you are human" to WebDriver-driven Safari, as designed |
 | Scale to zero | all containers gone ~2 min 45 s after the last message (120 s window + shutdown) |
 | Cost of the live test | $0.16 (L40S, 240 s) |
+
+### Phase 6 — load test (2026-11-03)
+
+k6 v2.3.0 (`scripts/loadtest/chat.js`) ramps 1 → 10 → 40 → 80 streaming users over 4 min, holds 80
+for 3 min, then ramps down; each user sends a prompt asking for a ~150-word answer, waits 1–3 s, repeats.
+Requests carry the load-test header (skips per-session/per-IP limits only — budget check, global
+cap and shaping still apply; disabled again after each run). Session tokens are signed locally, so
+Turnstile stays on for real visitors. `monitor.py` sampled streams in flight and live containers.
+
+**Run 1** found the bottleneck: one gateway container (0.25 core reserved) relaying one SSE message
+per token sat flat at ~1.2 cores — a single Python event loop at full speed — while vLLM never had more
+than 25 requests generating and its queue stayed empty. **Run 2** after three changes: reserve 1 core per
+gateway, `@modal.concurrent(target_inputs=40)` so the autoscaler spreads streams over both allowed
+gateway containers, and relay tokens in ≤50 ms batches (first token still sent at once).
+
+| Metric | Run 1 (before) | **Run 2 (after)** |
+|---|---|---|
+| Concurrency reached (streams in flight) | 78 | 68 (same 80 users; replies finish faster) |
+| Containers at peak | 1 gateway, 1 L40S | 2 gateways, 2 L40S |
+| Streams completed in the 9-min run | 1,543 | **3,102** |
+| Time to first token p50 / p95 | 0.52 s / 1.45 s | 0.93 s / 2.86 s |
+| Tokens/s per user p50 (p95) | 12.5 (55) | **43 (49)** |
+| Total response time p50 / p95 | 14.4 s / 26.8 s | **5.3 s / 8.5 s** |
+| Aggregate output | 583 tok/s | **1,153 tok/s** (peak 1,580 tok/s per GPU) |
+| Error rate | 0% (0 / 1,543) | **0% (0 / 3,102)** |
+| GPU cost | $0.36 | $0.52 |
+
+![Response time vs. concurrent streams, after the fix](docs/loadtest.svg)
+
+Before the fix: [docs/loadtest-before.svg](docs/loadtest-before.svg). Time to first token got slower in
+run 2 and is bimodal (~0.25 s and ~0.9 s clusters); the likely cause is a gateway container placed in a
+different region from the GPU and Upstash (Modal places unpinned containers anywhere). Containers now
+log their region at startup to confirm; pinning the gateway's region is an open decision (it costs a
+1.15–1.75× multiplier on the gateway's ~$0.05/hr).

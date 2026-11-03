@@ -171,3 +171,22 @@ def test_release_never_raises():
     _, ticket = run(limiter.admit("s1", "203.0.113.7"))
     redis.fail = True
     run(limiter.release(ticket, refund=True))  # logs, does not raise
+
+
+# ---------------------------------------------------------------- load-test bypass
+def test_skip_visitor_limits_ignores_session_and_ip_but_not_global_cap():
+    limiter, redis, _ = make()
+    held = []
+    for _ in range(config.SESSION_MSGS_PER_MIN + 5):  # same session, same IP, all concurrent
+        d, t = run(limiter.admit("lt", "203.0.113.7", skip_visitor_limits=True))
+        assert d.allowed
+        held.append(t)
+    assert not any(k.startswith("rl:s:") or k.startswith("rl:ip:") for k in redis.keys())
+    for i in range(config.GLOBAL_MAX_STREAMS - len(held)):
+        d, t = run(limiter.admit("lt", "203.0.113.7", skip_visitor_limits=True))
+        assert d.allowed
+        held.append(t)
+    d, _ = run(limiter.admit("lt", "203.0.113.7", skip_visitor_limits=True))
+    assert (d.status, d.error) == (503, "busy")
+    run(limiter.release(held[0]))
+    assert run(limiter.admit("lt", "203.0.113.7", skip_visitor_limits=True))[0].allowed

@@ -21,6 +21,7 @@ SPEND_DICT = "model-in-modal-spend"
 SECRET_VLLM = "model-in-modal-vllm"  # VLLM_API_KEY
 SECRET_PROXY = "model-in-modal-proxy"  # MODAL_PROXY_KEY, MODAL_PROXY_SECRET
 SECRET_GATEWAY = "model-in-modal-gateway"  # SESSION_SIGNING_KEY, TURNSTILE_SECRET, UPSTASH_*
+SECRET_LOADTEST = "model-in-modal-loadtest"  # LOADTEST_KEY ("off" = bypass disabled)
 
 # ---------------------------------------------------------------------------
 # Model and serving image
@@ -65,11 +66,15 @@ GPU_MEMORY_UTILIZATION = 0.92
 # ---------------------------------------------------------------------------
 # Gateway container (CPU only)
 # ---------------------------------------------------------------------------
-GATEWAY_CPU_CORES = 0.25
+# Phase 6 load test: at 78 streams one gateway used ~1.2 cores (a single Python event
+# loop at full speed) while reserving 0.25. Reserve a full core so the spend meter
+# matches what Modal bills, and let the autoscaler spread load (target_inputs).
+GATEWAY_CPU_CORES = 1.0
 GATEWAY_MEMORY_MIB = 512
 GATEWAY_MIN_CONTAINERS = 0
 GATEWAY_MAX_CONTAINERS = 2
-GATEWAY_MAX_INPUTS = 200
+GATEWAY_MAX_INPUTS = 200  # burst ceiling per container
+GATEWAY_TARGET_INPUTS = 40  # autoscaler target per container: 80 streams -> 2 containers
 GATEWAY_SCALEDOWN_WINDOW_S = 120
 GATEWAY_REQUEST_TIMEOUT_S = 6 * 60  # per request; > warm wait + longest stream
 GATEWAY_LABEL = f"{APP_NAME}-gateway"
@@ -129,6 +134,11 @@ SESSION_MAX_CONCURRENT_STREAMS = 1
 IP_MSGS_PER_DAY = 150
 GLOBAL_MAX_STREAMS = GPU_MAX_CONTAINERS * GPU_MAX_INPUTS  # 80
 REDIS_TIMEOUT_S = 5  # per Upstash call; on failure the gateway fails closed (503)
+# Load-test bypass (Phase 6): a request whose header matches LOADTEST_KEY skips the
+# per-session and per-IP limits only. Token check, budget check, global stream cap
+# and shaping always apply. Browsers can't send it (not in the CORS allow-list).
+LOADTEST_HEADER = "X-Loadtest-Key"
+LOADTEST_MIN_KEY_CHARS = 32  # anything shorter (e.g. "off") disables the bypass
 # Retry hints sent with 429 / 503 responses.
 STREAM_IN_PROGRESS_RETRY_AFTER_S = 3
 BUSY_RETRY_AFTER_S = 5
@@ -168,6 +178,9 @@ UPSTREAM_CONNECT_TIMEOUT_S = 10
 UPSTREAM_WARM_WAIT_S = 20
 UPSTREAM_READ_TIMEOUT_S = 60  # max silence between streamed chunks
 STREAM_MAX_DURATION_S = 5 * 60  # hard cap per response
+# Tokens are relayed in batches: the first at once (time to first token), the rest
+# at most every this many seconds. Cuts gateway messages ~5-10x; looks just as smooth.
+STREAM_FLUSH_INTERVAL_S = 0.05
 # Safety-net TTL so a crashed stream can't hold a stream slot (or lock a session)
 # forever. Must exceed the longest legitimate request.
 STREAM_SLOT_TTL_S = UPSTREAM_WARM_WAIT_S + STREAM_MAX_DURATION_S + 40  # 6 min
